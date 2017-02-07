@@ -1,0 +1,4 @@
+envSR
+*.jpg
+data/
+.ipynb_checkpoints
