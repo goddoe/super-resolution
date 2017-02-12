@@ -3,3 +3,4 @@ envSR
 data/
 .ipynb_checkpoints
 __pycache__/
+.idea
