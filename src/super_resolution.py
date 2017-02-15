@@ -24,34 +24,62 @@ def random_crop(src, size):
     return cropped
 
 
-def load_imgs(dir_path, size):
-    width = size[0]
-    height = size[1]
-    name_list = os.listdir(dir_path)
+def extract_patch_list(src, size, stride):
+    patch_list = []
+
+    height = src.shape[0]
+    width = src.shape[1]
+
+    size_w = size[0]
+    size_h = size[1]
+
+    stride_w = stride[0]
+    stride_h = stride[1]
+
+    w_q = (width - size_w) // stride_w
+    h_q = (height - size_h) // stride_h
+
+    for h in range(h_q):
+        for w in range(w_q):
+            patch = src[h * stride_h: h * stride_h + size_h,
+                    w * stride_w: w * stride_w + size_w]
+
+            patch_list.append(patch)
+
+    return patch_list
+
+
+def load_img_list(dir_path):
     img_list = []
 
+    name_list = os.listdir(dir_path)
     for name in name_list:
         img_path = "{}/{}".format(dir_path, name)
         img = cv2.imread(img_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        for i in range(50):
-            try:
-                img_cropped = random_crop(img, (width, height))
-                img_list.append(img_cropped)
-            except Exception as e:
-                print(e)
+        img_list.append(img)
     return img_list
 
 
-def blur_img_list(img_list, size):
-    width = size[0]
-    height = size[1]
+def load_img_list_and_extract_patch_list(dir_path, size, stride):
+    patch_list_all = []
 
+    img_list = load_img_list(dir_path)
+    for img in img_list:
+        patch_list = extract_patch_list(img, size, stride)
+        patch_list_all.extend(patch_list)
+    return patch_list_all
+
+
+def blur_img_list(img_list, scale=2):
     result_list = []
     for img in img_list:
-        w = round(width / 1.5)
-        h = round(height / 1.5)
+        height = img.shape[0]
+        width = img.shape[1]
+
+        w = round(width / scale)
+        h = round(height / scale)
+
         result = cv2.resize(img, (w, h), interpolation=cv2.INTER_CUBIC)
         result = cv2.resize(result, (width, height), interpolation=cv2.INTER_CUBIC)
         result_list.append(result)
@@ -63,17 +91,19 @@ Model
 """
 
 
-def conv2d(X, n_input, n_output, filter_size, activation=None, name=None):
+def conv2d(X, n_input, n_output, filter_size, activation=None, name=None, W=None, b=None):
     with tf.variable_scope(name):
-        W = tf.get_variable(
-            name='W_1',
-            shape=[filter_size[0], filter_size[1], n_input, n_output],
-            initializer=tf.contrib.layers.xavier_initializer_conv2d())
+        if W is None:
+            W = tf.get_variable(
+                name='W_1',
+                shape=[filter_size[0], filter_size[1], n_input, n_output],
+                initializer=tf.contrib.layers.xavier_initializer_conv2d())
 
-        b = tf.get_variable(
-            name='b_1',
-            shape=[n_output],
-            initializer=tf.constant_initializer(0.))
+        if b is None:
+            b = tf.get_variable(
+                name='b_1',
+                shape=[n_output],
+                initializer=tf.constant_initializer(0.))
 
         h = tf.nn.conv2d(X,
                          W,
@@ -83,14 +113,14 @@ def conv2d(X, n_input, n_output, filter_size, activation=None, name=None):
         if activation != None:
             h = activation(tf.nn.bias_add(h, b))
 
-    return h
+    return h, W, b
 
 
 class USRCNN(object):
     def __init__(self, sess):
 
         self.sess = sess
-        self.shape = (50, 50, 3)
+        self.shape = (41, 41, 3)
         self.mean_img = None
         self.std_img = None
         self.min_loss = None
@@ -127,7 +157,6 @@ class USRCNN(object):
         width = self.shape[1]
         channel = self.shape[2]
 
-        n_flat = height * width * channel
         X = tf.placeholder(tf.float32, shape=[None, height, width, channel], name='X')
         Y = tf.placeholder(tf.float32, shape=[None, height, width, channel], name='Y')
 
@@ -135,53 +164,98 @@ class USRCNN(object):
 
         global_step = tf.Variable(0, trainable=False)
 
-        layer_info_list = [
-            {'name': 'conv_1',
+        embeding_layer_info_list = [
+            {'name': 'embed/conv_1',
              'n_input': 3,
-             'n_output': 64,
+             'n_output': 128,
              'filter_size': (3, 3),
              'activation': tf.nn.relu},
-            {'name': 'conv_2',
-             'n_input': 64,
-             'n_output': 64,
+            {'name': 'embed/conv_2',
+             'n_input': 128,
+             'n_output': 128,
              'filter_size': (3, 3),
              'activation': tf.nn.relu},
-            {'name': 'conv_3',
-             'n_input': 64,
-             'n_output': 64,
-             'filter_size': (3, 3),
-             'activation': tf.nn.relu},
-            {'name': 'conv_4',
-             'n_input': 64,
-             'n_output': 64,
-             'filter_size': (3, 3),
-             'activation': tf.nn.relu},
-            {'name': 'conv_5',
-             'n_input': 64,
-             'n_output': 3,
-             'filter_size': (3, 3),
-             'activation': None},
         ]
 
+        inference_layer_info = {'name': 'inference/conv_1',
+                                'n_input': 128,
+                                'n_output': 128,
+                                'filter_size': (3, 3),
+                                'activation': tf.nn.relu}
+
+        reconstruction_layer_info = {'name': 'reconstruction/conv_1',
+                                     'n_input': 128,
+                                     'n_output': 3,
+                                     'filter_size': (3, 3),
+                                     'activation': None}
+
         current_input = X
-        for info in layer_info_list:
-            current_input = conv2d(X=current_input,
-                                   n_input=info['n_input'],
-                                   n_output=info['n_output'],
-                                   filter_size=info['filter_size'],
-                                   activation=info['activation'],
-                                   name=info['name'],
-                                   )
+        # embedding network
+        for info in embeding_layer_info_list:
+            current_input, _, _ = conv2d(X=current_input,
+                                         n_input=info['n_input'],
+                                         n_output=info['n_output'],
+                                         filter_size=info['filter_size'],
+                                         activation=info['activation'],
+                                         name=info['name'],
+                                         )
 
-        Y_pred = current_input + X
+        # inference network
+        inference_layer_output_list = []
 
-        Y_pred_flattened = tf.reshape(Y_pred, shape=[-1, n_flat])
-        Y_flattened = tf.reshape(Y, shape=[-1, n_flat])
+        info = inference_layer_info
+        recursion = 9
+        current_input, W, b = conv2d(X=current_input,
+                                     n_input=info['n_input'],
+                                     n_output=info['n_output'],
+                                     filter_size=info['filter_size'],
+                                     activation=info['activation'],
+                                     name=info['name'] + '/first',
+                                     )
+        for i in range(recursion):
+            current_input, _, _ = conv2d(X=current_input,
+                                         n_input=info['n_input'],
+                                         n_output=info['n_output'],
+                                         filter_size=info['filter_size'],
+                                         activation=info['activation'],
+                                         name=info['name'] + '/' + str(i),
+                                         W=W,
+                                         b=b)
+
+            inference_layer_output_list.append(current_input)
+
+        # reconstruction network
+        local_output_list = []
+
+        info = reconstruction_layer_info
+
+        for i, inference in enumerate(inference_layer_output_list):
+            local_output, _, _ = conv2d(X=inference,
+                                        n_input=info['n_input'],
+                                        n_output=info['n_output'],
+                                        filter_size=info['filter_size'],
+                                        activation=info['activation'],
+                                        name=info['name'] + "/inference_{}".format(i), )
+
+            local_output = tf.add(local_output, X)
+
+            local_output_5d = tf.expand_dims(local_output, 0)
+            local_output_list.append(local_output_5d)
+
+        local_output_concat = tf.concat(0, local_output_list)
+        print("local_output_concat shape : {}".format(local_output_concat.get_shape().as_list()))
+
+        average_img = tf.reduce_mean(local_output_concat, axis=0, name='average_output')
+        print("average_image shape : {}".format(average_img.get_shape().as_list()))
+
+        Y_pred = average_img
+        print("Y_pred shape : {}".format(Y_pred.get_shape().as_list()))
+        print("Y shape : {}".format(Y.get_shape().as_list()))
+
+        cost = tf.reduce_mean(tf.reduce_sum(tf.square(Y_pred - Y), axis=[1, 2, 3]), axis=0, name="reduce_mean_cost")
 
         learning_rate = tf.train.exponential_decay(start_learning_rate, global_step,
-                                                   1000, 0.96, staircase=True)
-
-        cost = tf.reduce_mean(tf.reduce_sum(tf.squared_difference(Y_pred_flattened, Y_flattened), axis=1), axis=0)
+                                                   10000, 0.96, staircase=True)
         optimizer = tf.train.AdamOptimizer(learning_rate).minimize(cost)
 
         self.X = X
@@ -192,7 +266,8 @@ class USRCNN(object):
         self.start_learning_rate = start_learning_rate
         self.gloabal_step = global_step
 
-    def train(self, X_train, Y_train, batch_size, n_epoch,start_learning_rate, save_dir_path, X_valid=None, Y_valid=None):
+    def train(self, X_train, Y_train, batch_size, n_epoch, start_learning_rate, save_dir_path, X_valid=None,
+              Y_valid=None):
 
         fig, axs = plt.subplots(1, 4, figsize=(20, 6))
         if self.min_loss is None:
@@ -243,7 +318,6 @@ class USRCNN(object):
                 print("weights_path : {}".format(weights_path))
                 print("meta_data_path : {}".format(meta_path))
                 print("-" * 30)
-
 
             if epoch_i % 10 == 0:
                 test_img_origin = test_img_source[1][test_img_idx]
@@ -356,7 +430,7 @@ def run():
     width = 50
     channel = 3
 
-    img_list = load_imgs("./data/urban_hr", (width, height))
+    img_list = load_img_list_and_extract_patch_list("./data/urban_hr", (width, height))
 
     X_all = np.array(blur_img_list(img_list, (width, height)))
     Y_all = np.array(img_list)
@@ -387,7 +461,7 @@ def run():
 
     sess = tf.Session()
     usrcnn = USRCNN(sess)
-    usrcnn.load(sess,'./model/weights','./model/meta_data.pickle')
+    usrcnn.load(sess, './model/weights', './model/meta_data.pickle')
     usrcnn.train(X_train, Y_train, X_valid=X_valid, Y_valid=Y_valid,
                  batch_size=64, n_epoch=3000, save_dir_path='./model')
 
@@ -395,7 +469,7 @@ def run():
 
 
 def test():
-    def load_imgs(dir_path):
+    def load_img_list_and_extract_patch_list(dir_path):
         name_list = os.listdir(dir_path)
 
         img_list = []
@@ -408,7 +482,7 @@ def test():
             img_list.append(img)
         return img_list
 
-    test_img_list = load_imgs("./data/celeba")
+    test_img_list = load_img_list_and_extract_patch_list("./data/celeba")
     test_img = test_img_list[10]
     test_img_resized = cv2.resize(test_img, (test_img.shape[1] // 3, test_img.shape[0] // 3),
                                   interpolation=cv2.INTER_CUBIC)
@@ -424,7 +498,7 @@ def test():
 
 """
 
-def load_imgs(dir_path):
+def load_img_list_and_extract_patch_list(dir_path):
     name_list = os.listdir(dir_path)
 
     img_list = []
@@ -436,7 +510,7 @@ def load_imgs(dir_path):
 
         img_list.append(img)
     return img_list
-test_img_list = load_imgs("./data/celeba")
+test_img_list = load_img_list_and_extract_patch_list("./data/celeba")
 test_img = test_img_list[10]
 test_img_resized = cv2.resize(test_img, (test_img.shape[1]//3, test_img.shape[0]//3), interpolation = cv2.INTER_CUBIC)
 test_img_resized = cv2.resize(test_img_resized, (test_img.shape[1],test_img.shape[0]), interpolation = cv2.INTER_CUBIC)
