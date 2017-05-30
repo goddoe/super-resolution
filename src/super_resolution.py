@@ -242,7 +242,7 @@ class USRCNN(object):
             local_output_5d = tf.expand_dims(local_output, 0)
             local_output_list.append(local_output_5d)
 
-        local_output_concat = tf.concat(0, local_output_list)
+        local_output_concat = tf.concat(local_output_list,0)
         print("local_output_concat shape : {}".format(local_output_concat.get_shape().as_list()))
 
         average_img = tf.reduce_mean(local_output_concat, axis=0, name='average_output')
